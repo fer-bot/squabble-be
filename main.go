@@ -1,31 +1,16 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
-	"net/http"
 	"os"
 
 	"squabble/controller"
 	"squabble/db"
-	"squabble/form"
 	"squabble/models"
 
+	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
-
-func SessionAuthMiddleware(fn func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		sessionUUID := r.Header.Get("session-id")
-		username, err := models.GetUserModel().VerifyToken(sessionUUID)
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(form.SingleErrorResponseBuilder(err))
-			return
-		}
-		fn(w, r, username)
-	}
-}
 
 func main() {
 	err := godotenv.Load(os.Getenv("ENV") + ".env")
@@ -38,13 +23,31 @@ func main() {
 	models.AutoMigrate()
 	go models.GetHub().Run()
 
-	http.HandleFunc("/user/login", controller.LoginHandler)
-	http.HandleFunc("/user/register", controller.RegisterHandler)
-	http.HandleFunc("/user/logout", SessionAuthMiddleware(controller.LogoutHandler))
-	http.HandleFunc("/start/", SessionAuthMiddleware(controller.Start))
-	http.HandleFunc("/answer/", SessionAuthMiddleware(controller.Answer))
-	http.HandleFunc("/listen-game-state/", SessionAuthMiddleware(controller.ListenGameWS))
+	router := gin.New()
+
+	router.POST("/user/login", func(c *gin.Context) {
+		controller.LoginHandler(c.Writer, c.Request)
+	})
+	router.POST("/user/register", func(c *gin.Context) {
+		controller.RegisterHandler(c.Writer, c.Request)
+	})
+	router.GET("/user/logout", func(c *gin.Context) {
+		controller.LogoutHandler(c.Writer, c.Request)
+	})
+	router.POST("/start/:roomId", func(c *gin.Context) {
+		roomId := c.Param("roomId")
+		controller.Start(c.Writer, c.Request, roomId)
+	})
+	router.POST("/answer/:roomId", func(c *gin.Context) {
+		roomId := c.Param("roomId")
+		controller.Answer(c.Writer, c.Request, roomId)
+	})
+	router.GET("/listen-game-state/:roomId", func(c *gin.Context) {
+		roomId := c.Param("roomId")
+		sessionId := c.Query("session-id")
+		controller.ListenGameWS(c.Writer, c.Request, roomId, sessionId)
+	})
 
 	log.Printf("Starting server at Port: " + os.Getenv("PORT"))
-	log.Fatal(http.ListenAndServe(":"+os.Getenv("PORT"), nil))
+	router.Run("0.0.0.0:" + os.Getenv("PORT"))
 }

@@ -1,11 +1,10 @@
 package controller
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
-	"regexp"
 	"squabble/form"
 	"squabble/models"
 	"strings"
@@ -13,20 +12,18 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var validPath = regexp.MustCompile("^/(room|listen-game-state)/([a-zA-Z0-9]+)")
-
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 }
 
-func ListenGameWS(w http.ResponseWriter, r *http.Request, userid string) {
-	m := validPath.FindStringSubmatch(r.URL.Path)
-	if m == nil {
-		http.NotFound(w, r)
+func ListenGameWS(w http.ResponseWriter, r *http.Request, roomId string, sessionId string) {
+	username, err := models.GetUsername(sessionId)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(form.SingleErrorResponseBuilder(err))
 		return
 	}
-	roomId := m[len(m)-1]
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -34,47 +31,53 @@ func ListenGameWS(w http.ResponseWriter, r *http.Request, userid string) {
 		return
 	}
 	c := &models.Connection{Send: make(chan []byte, 256), Ws: ws}
-	s := models.Subscription{Conn: c, Room: roomId, UserId: userid}
+	s := models.Subscription{Conn: c, Room: roomId, UserId: username}
 
 	models.GetHub().Register <- s
-	go s.ReadPump()
+	go s.WritePump()
 }
 
-func Start(w http.ResponseWriter, r *http.Request, userid string) {
-	m := validPath.FindStringSubmatch(r.URL.Path)
-	if m == nil {
-		http.NotFound(w, r)
+func Start(w http.ResponseWriter, r *http.Request, roomId string) {
+	username, err := models.SessionAuth(w, r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(form.SingleErrorResponseBuilder(err))
 		return
 	}
-	roomId := m[len(m)-1]
 
 	roomDetails, exist := models.GetHub().Details[roomId]
 
 	// room has already started or starter not the creator
-	if !exist || roomDetails.IsStart || roomDetails.CreatorId != userid {
+	if !exist || roomDetails.IsStart || roomDetails.CreatorId != username {
 		w.WriteHeader(http.StatusBadRequest)
+		err = errors.New("room has already started")
+		json.NewEncoder(w).Encode(form.SingleErrorResponseBuilder(err))
 		return
 	}
 
 	// add one random word
 	models.AddWord(roomId)
+	roomDetails = models.GetHub().Details[roomId]
 
-	// start
+	// set start to true
 	roomDetails.IsStart = true
+	models.GetHub().Details[roomId] = roomDetails
+
+	// broadcast new all player properties
 	models.BroadcastMessage(roomId, "starting-room", []byte{})
 }
 
-func Answer(w http.ResponseWriter, r *http.Request, userid string) {
-	m := validPath.FindStringSubmatch(r.URL.Path)
-	if m == nil {
-		http.NotFound(w, r)
+func Answer(w http.ResponseWriter, r *http.Request, roomId string) {
+	username, err := models.SessionAuth(w, r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(form.SingleErrorResponseBuilder(err))
 		return
 	}
-	roomId := m[len(m)-1]
 
 	// get word
 	var answerRequest form.AnswerRequest
-	err := json.NewDecoder(r.Body).Decode(&answerRequest)
+	err = json.NewDecoder(r.Body).Decode(&answerRequest)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(form.SingleErrorResponseBuilder(err))
@@ -90,12 +93,12 @@ func Answer(w http.ResponseWriter, r *http.Request, userid string) {
 
 	// check if room and player valid
 	details, exist := models.GetHub().Details[roomId]
-	if !exist || !details.IsStart || details.Playerproperties[userid].Health <= 0 {
+	if !exist || !details.IsStart || details.Playerproperties[username].Health <= 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	playerprop, exist := details.Playerproperties[userid]
-	secretprop := details.SecretPlayerproperties[userid]
+	playerprop, exist := details.Playerproperties[username]
+	secretprop := details.SecretPlayerproperties[username]
 	if !exist {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -128,7 +131,10 @@ func Answer(w http.ResponseWriter, r *http.Request, userid string) {
 		correctAns = false
 	}
 
+	// return result
 	json.NewEncoder(w).Encode(form.AnswerResponseBuilder(playerprop.AnsStatus[playerprop.CurrRow]))
+
+	// set new player properties and secret properties
 	if correctAns {
 		secretprop.Ans = [6][5]rune{}
 		secretprop.WordIdx += 1
@@ -137,6 +143,7 @@ func Answer(w http.ResponseWriter, r *http.Request, userid string) {
 		playerprop.Health += 50
 	} else {
 		playerprop.Health -= 5
+		playerprop.CurrRow += 1
 		if playerprop.CurrRow == 6 {
 			secretprop.Ans = [6][5]rune{}
 			playerprop.AnsStatus = [6][5]string{}
@@ -144,8 +151,9 @@ func Answer(w http.ResponseWriter, r *http.Request, userid string) {
 			playerprop.Health -= 50
 		}
 	}
+	details.Playerproperties[username] = playerprop
+	details.SecretPlayerproperties[username] = secretprop
 
-	reqBodyBytes := new(bytes.Buffer)
-	json.NewEncoder(reqBodyBytes).Encode(models.GetHub().Details[roomId].Playerproperties)
-	models.BroadcastMessage(roomId, "curr-user-data", reqBodyBytes.Bytes())
+	// broadcast new all player properties
+	models.BroadcastMessage(roomId, "curr-user-data", models.GetHub().Details[roomId].Playerproperties)
 }

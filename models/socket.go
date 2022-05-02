@@ -3,7 +3,6 @@ package models
 import (
 	"bytes"
 	"encoding/json"
-	"log"
 	"squabble/utils"
 	"time"
 
@@ -30,9 +29,10 @@ type Message struct {
 	Data []byte
 	Room string
 }
-type MessageData struct {
+
+type MessageData[T any] struct {
 	DataType string
-	Data     []byte
+	Data     T
 }
 
 type PlayerProperties struct {
@@ -66,13 +66,11 @@ type RoomDetails struct {
 type hub struct {
 	Rooms      map[string]map[*Connection]bool
 	Details    map[string]RoomDetails
-	Broadcast  chan Message
 	Register   chan Subscription
 	Unregister chan Subscription
 }
 
 var h = hub{
-	Broadcast:  make(chan Message),
 	Register:   make(chan Subscription),
 	Unregister: make(chan Subscription),
 	Rooms:      make(map[string]map[*Connection]bool),
@@ -91,31 +89,45 @@ func (h *hub) Run() {
 			if connections == nil {
 				connections = make(map[*Connection]bool)
 				h.Rooms[s.Room] = connections
-				h.Details[s.Room] = RoomDetails{IsStart: false, CreatorId: s.UserId, CreatedAt: time.Now()}
+				h.Details[s.Room] = RoomDetails{
+					IsStart: false, 
+					CreatorId: s.UserId, 
+					CreatedAt: time.Now(), 
+					WordList: make([]string, 0), 
+					Playerproperties: make(map[string]PlayerProperties),
+					SecretPlayerproperties: make(map[string]SecretPlayerProperties),
+				}
 			}
-			playerproperty, exist := h.Details[s.Room].Playerproperties[s.UserId]
+
+			roomDetails := h.Details[s.Room]
+			playerproperty, exist := roomDetails.Playerproperties[s.UserId]
 			if !exist {
 				playerproperty = PlayerProperties{Health: 100}
+				roomDetails.Playerproperties[s.UserId] = playerproperty
 			}
-			secretplayerproperty := h.Details[s.Room].SecretPlayerproperties[s.UserId]
+			secretplayerproperty, exist := roomDetails.SecretPlayerproperties[s.UserId]
 			if !exist {
 				secretplayerproperty = SecretPlayerProperties{WordIdx: 0}
+				roomDetails.SecretPlayerproperties[s.UserId] = secretplayerproperty
 			}
 			h.Rooms[s.Room][s.Conn] = true
-
-			reqBodyBytes := new(bytes.Buffer)
+		
 			// send one user's data
-			singlePlayerData := SinglePlayerData{Playerproperty: playerproperty, SecretPlayerproperties: secretplayerproperty, IsStart: h.Details[s.Room].IsStart, CurrWord: ""}
-			if singlePlayerData.IsStart {
-				singlePlayerData.CurrWord = h.Details[s.Room].WordList[secretplayerproperty.WordIdx]
+			singlePlayerData := SinglePlayerData{
+				Playerproperty: playerproperty, 
+				SecretPlayerproperties: secretplayerproperty, 
+				IsStart: roomDetails.IsStart, 
+				CurrWord: ""
 			}
-			json.NewEncoder(reqBodyBytes).Encode(singlePlayerData)
-			json.NewEncoder(reqBodyBytes).Encode(MessageData{DataType: "single", Data: reqBodyBytes.Bytes()})
-			s.Conn.Send <- reqBodyBytes.Bytes()
+			if roomDetails.IsStart {
+				singlePlayerData.CurrWord = roomDetails.WordList[secretplayerproperty.WordIdx]
+			}
+			respBodyBytes := new(bytes.Buffer)
+			json.NewEncoder(respBodyBytes).Encode(MessageData[SinglePlayerData]{DataType: "single", Data: singlePlayerData})
+			s.Conn.Send <- respBodyBytes.Bytes()
 
 			// broadcast new users' data
-			json.NewEncoder(reqBodyBytes).Encode(h.Details[s.Room].Playerproperties)
-			BroadcastMessage(s.Room, "curr-users-data", reqBodyBytes.Bytes())
+			BroadcastMessage(s.Room, "curr-users-data", roomDetails.Playerproperties)
 
 		case s := <-h.Unregister:
 			connections := h.Rooms[s.Room]
@@ -138,53 +150,63 @@ func (h *hub) Run() {
 					}
 				}
 			}
-
-		case m := <-h.Broadcast:
-			connections := h.Rooms[m.Room]
-			for c := range connections {
-				select {
-				case c.Send <- m.Data:
-				default:
-					close(c.Send)
-					delete(connections, c)
-					if len(connections) == 0 {
-						delete(h.Rooms, m.Room)
-						delete(h.Details, m.Room)
-					}
-				}
-			}
 		}
 	}
 }
 
-func (s Subscription) ReadPump() {
+// write writes a message with the given message type and payload.
+func (c *Connection) Write(mt int, payload []byte) error {
+	c.Ws.SetWriteDeadline(time.Now().Add(writeWait))
+	return c.Ws.WriteMessage(mt, payload)
+}
+
+// writePump pumps messages from the hub to the websocket connection.
+func (s *Subscription) WritePump() {
 	c := s.Conn
+	ticker := time.NewTicker(pingPeriod)
 	defer func() {
-		h.Unregister <- s
+		ticker.Stop()
 		c.Ws.Close()
 	}()
-	c.Ws.SetReadLimit(maxMessageSize)
-	c.Ws.SetReadDeadline(time.Now().Add(pongWait))
-	c.Ws.SetPongHandler(func(string) error { c.Ws.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
-		_, msg, err := c.Ws.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
-				log.Printf("error: %v", err)
+		select {
+		case message, ok := <-c.Send:
+			if !ok {
+				c.Write(websocket.CloseMessage, []byte{})
+				return
 			}
-			break
+			if err := c.Write(websocket.TextMessage, message); err != nil {
+				return
+			}
+		case <-ticker.C:
+			if err := c.Write(websocket.PingMessage, []byte{}); err != nil {
+				return
+			}
 		}
-		m := Message{msg, s.Room}
-		h.Broadcast <- m
 	}
 }
 
-func BroadcastMessage(roomId string, messageType string, messageByte []byte) {
+// broadcast to all connections
+func BroadcastMessage[T any](roomId string, messageType string, messageData T) {
 	reqBodyBytes := new(bytes.Buffer)
-	json.NewEncoder(reqBodyBytes).Encode(MessageData{DataType: messageType, Data: messageByte})
-	h.Broadcast <- Message{Room: roomId, Data: reqBodyBytes.Bytes()}
+	json.NewEncoder(reqBodyBytes).Encode(MessageData[T]{DataType: messageType, Data: messageData})
+
+	connections := h.Rooms[roomId]
+	for c := range connections {
+		select {
+		case c.Send <- reqBodyBytes.Bytes():
+		default:
+			close(c.Send)
+			delete(connections, c)
+			if len(connections) == 0 {
+				delete(h.Rooms, roomId)
+				delete(h.Details, roomId)
+			}
+		}
+	}
 }
 
+// add new word to the list
 func AddWord(roomId string) {
 	word, err := utils.GetRandomWord(5)
 	if err != nil {
@@ -194,4 +216,5 @@ func AddWord(roomId string) {
 	roomDetails := h.Details[roomId]
 	roomDetails.WordList = append(roomDetails.WordList, word)
 	roomDetails.WordListCount += 1
+	h.Details[roomId] = roomDetails
 }

@@ -24,7 +24,13 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(form.LoginFormResponseBuilder(tokenDetails))
 }
 
-func LogoutHandler(w http.ResponseWriter, r *http.Request, username string) {
+func LogoutHandler(w http.ResponseWriter, r *http.Request) {
+	username, err := models.SessionAuth(w, r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(form.SingleErrorResponseBuilder(err))
+		return
+	}
 	sessionUUID := r.Header.Get("session-id")
 	if err := models.GetUserModel().Logout(sessionUUID); err != nil {
 		w.WriteHeader(http.StatusBadRequest)

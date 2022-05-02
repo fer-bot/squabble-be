@@ -2,6 +2,7 @@ package models
 
 import (
 	"errors"
+	"net/http"
 	"squabble/db"
 	"squabble/error_constant"
 	"time"
@@ -51,4 +52,17 @@ func (m AuthModel) DeleteToken(sessionUUID string) error {
 		return err
 	}
 	return nil
+}
+
+func SessionAuth(w http.ResponseWriter, r *http.Request) (string, error) {
+	sessionUUID := r.Header.Get("session-id")
+	return GetUsername(sessionUUID)
+}
+
+func GetUsername(sessionUUID string) (string, error) {
+	username, err := GetUserModel().VerifyToken(sessionUUID)
+	if err != nil {
+		return "", err
+	}
+	return username, nil
 }
