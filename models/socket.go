@@ -117,7 +117,7 @@ func (h *hub) Run() {
 				Playerproperty: playerproperty, 
 				SecretPlayerproperties: secretplayerproperty, 
 				IsStart: roomDetails.IsStart, 
-				CurrWord: ""
+				CurrWord: "",
 			}
 			if roomDetails.IsStart {
 				singlePlayerData.CurrWord = roomDetails.WordList[secretplayerproperty.WordIdx]
