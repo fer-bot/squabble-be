@@ -1,6 +1,8 @@
-# SKUABLE
+# SQUABBLE BACK END
 
-To run:
+Personal project created to learn Golang. Squabble is a wordle party game. ( immitating https://squabble.me/ ) 
+
+### To run:
 
 - Create `.env` file containing:
 
