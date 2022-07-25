@@ -1,6 +1,6 @@
 # SQUABBLE BACK END
 
-Personal project created to learn Golang. Squabble is a wordle party game. ( immitating https://squabble.me/ ) 
+Personal project created to learn Golang. Squabble is a wordle party game. (imitating https://squabble.me/) 
 
 ### To run:
 
